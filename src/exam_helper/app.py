@@ -39,14 +39,20 @@ class AutosavePayload(BaseModel):
     mc_options_guidance: str = ""
     question_template_md: str = ""
     solution_parameters_yaml: str = "{}"
+    answer_formula_md: str = ""
     answer_guidance: str = ""
     answer_python_code: str = ""
     distractor_functions_text: str = ""
+    mc_answer_specs_json: str = "[]"
     choices_yaml: str = "[]"
     typed_solution_md: str = ""
     typed_solution_status: str = "missing"
     figures_json: str = "[]"
     points: int = 5
+
+
+class ChatPayload(BaseModel):
+    message: str = ""
 
 
 def _sanitize_docx_filename_stem(project_name: str) -> str:
@@ -275,6 +281,131 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
             "edit_mode": edit_mode,
         }
 
+    def _build_question_from_editor_values(
+        question_id: str,
+        existing: Question | None,
+        values: dict[str, Any],
+    ) -> tuple[Question, dict[str, Any], dict[str, Any]]:
+        def _as_int(value: Any, fallback: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return fallback
+
+        figures_raw = values.get("figures_json", "[]")
+        solution_parameters = parse_parameters_yaml(
+            str(values.get("solution_parameters_yaml", "{}"))
+        )
+        distractor_funcs = parse_distractor_functions_text(
+            str(values.get("distractor_functions_text", ""))
+        )
+        mc_answer_specs: list[dict[str, Any]] = []
+        question_type_value = str(
+            values.get(
+                "question_type",
+                existing.question_type.value if existing else "free_response",
+            )
+        )
+        choices = parse_choices_yaml(str(values.get("choices_yaml", "[]")))
+        question = Question.model_validate(
+            {
+                "id": question_id,
+                "title": str(values.get("title", "")),
+                "points": _as_int(values.get("points", 5), 5),
+                "is_deleted": (existing.is_deleted if existing else False),
+                "question_type": QuestionType(question_type_value),
+                "mc_options_guidance": str(values.get("mc_options_guidance", "")),
+                "choices": choices,
+                "solution": {
+                    "question_template_md": normalize_markdown_math_delimiters(
+                        str(values.get("question_template_md", ""))
+                    ),
+                    "parameters": solution_parameters,
+                    "answer_formula_md": str(values.get("answer_formula_md", "")),
+                    "answer_guidance": str(values.get("answer_guidance", "")),
+                    "answer_python_code": str(values.get("answer_python_code", "")),
+                    "mc_answer_specs": mc_answer_specs,
+                    "distractor_python_code": distractor_funcs,
+                    "typed_solution_md": normalize_markdown_math_delimiters(
+                        str(
+                            values.get(
+                                "typed_solution_md",
+                                existing.solution.typed_solution_md if existing else "",
+                            )
+                        )
+                    ),
+                    "typed_solution_status": str(
+                        values.get("typed_solution_status", "missing")
+                    ),
+                    "last_computed_answer_md": (
+                        normalize_markdown_math_delimiters(
+                            existing.solution.last_computed_answer_md
+                        )
+                        if existing
+                        else ""
+                    ),
+                },
+                "figures": json.loads(figures_raw or "[]"),
+            }
+        )
+        _mark_typed_solution_stale_if_needed(existing, question)
+        preview = {
+            "calculated_variables_md": "",
+            "rendered_answer_md": "",
+            "warning": "",
+        }
+        mc_preview = {
+            "choices": choices,
+            "preview_choices": [c.model_dump(mode="json") for c in choices],
+            "preview_answers": "",
+            "preview_rationale": "",
+            "warning": "",
+            "rows": [],
+        }
+        return question, preview, mc_preview
+
+    def _editor_values_from_question(question: Question | None) -> dict[str, Any]:
+        return {
+            "title": question.title if question else "",
+            "points": question.points if question else 5,
+            "question_type": (
+                question.question_type.value
+                if question
+                else QuestionType.free_response.value
+            ),
+            "mc_options_guidance": question.mc_options_guidance if question else "",
+            "question_template_md": (
+                question.solution.question_template_md if question else ""
+            ),
+            "solution_parameters_yaml": dump_parameters_yaml(
+                question.solution.parameters if question else {}
+            ),
+            "answer_formula_md": (
+                getattr(question.solution, "answer_formula_md", "") if question else ""
+            ),
+            "answer_guidance": question.solution.answer_guidance if question else "",
+            "distractor_functions_text": dump_distractor_functions_text(
+                question.solution.distractor_python_code if question else []
+            ),
+            "mc_answer_specs_json": "[]",
+            "choices_yaml": (
+                dump_choices_yaml(question.choices)
+                if question and question.choices
+                else default_mc_choices_yaml()
+            ),
+            "typed_solution_md": (
+                question.solution.typed_solution_md if question else ""
+            ),
+            "typed_solution_status": (
+                question.solution.typed_solution_status if question else "missing"
+            ),
+            "figures_json": json.dumps(
+                [f.model_dump(mode="json") for f in question.figures]
+                if question
+                else []
+            ),
+        }
+
     def _mark_typed_solution_stale_if_needed(
         existing: Question | None, candidate: Question
     ) -> None:
@@ -365,9 +496,11 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
         question_template_md: str = Form(""),
         choices_yaml: str = Form("[]"),
         solution_parameters_yaml: str = Form("{}"),
+        answer_formula_md: str = Form(""),
         answer_guidance: str = Form(""),
         answer_python_code: str = Form(""),
         distractor_functions_text: str = Form(""),
+        mc_answer_specs_json: str = Form("[]"),
         typed_solution_md: str = Form(""),
         typed_solution_status: str = Form("missing"),
         figures_json: str = Form("[]"),
@@ -377,43 +510,27 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
             existing = repo.get_question(question_id)
         except Exception:
             existing = None
-        choices = parse_choices_yaml(choices_yaml)
-        figures = json.loads(figures_json or "[]")
-        solution_parameters = parse_parameters_yaml(solution_parameters_yaml)
-        distractor_funcs = parse_distractor_functions_text(distractor_functions_text)
-        question = Question.model_validate(
+        question, _, _ = _build_question_from_editor_values(
+            question_id,
+            existing,
             {
-                "id": question_id,
                 "title": title,
                 "points": points,
-                "is_deleted": (existing.is_deleted if existing else False),
-                "question_type": QuestionType(question_type),
+                "question_type": question_type,
                 "mc_options_guidance": mc_options_guidance,
-                "choices": choices,
-                "solution": {
-                    "question_template_md": normalize_markdown_math_delimiters(
-                        question_template_md
-                    ),
-                    "parameters": solution_parameters,
-                    "answer_guidance": answer_guidance,
-                    "answer_python_code": answer_python_code,
-                    "distractor_python_code": distractor_funcs,
-                    "typed_solution_md": normalize_markdown_math_delimiters(
-                        typed_solution_md
-                    ),
-                    "typed_solution_status": typed_solution_status,
-                    "last_computed_answer_md": (
-                        normalize_markdown_math_delimiters(
-                            existing.solution.last_computed_answer_md
-                        )
-                        if existing
-                        else ""
-                    ),
-                },
-                "figures": figures,
-            }
+                "question_template_md": question_template_md,
+                "solution_parameters_yaml": solution_parameters_yaml,
+                "answer_formula_md": answer_formula_md,
+                "answer_guidance": answer_guidance,
+                "answer_python_code": answer_python_code,
+                "distractor_functions_text": distractor_functions_text,
+                "mc_answer_specs_json": mc_answer_specs_json,
+                "typed_solution_md": typed_solution_md,
+                "typed_solution_status": typed_solution_status,
+                "choices_yaml": choices_yaml,
+                "figures_json": figures_json,
+            },
         )
-        _mark_typed_solution_stale_if_needed(existing, question)
         repo.save_question(question)
         return RedirectResponse("/", status_code=303)
 
@@ -427,47 +544,27 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
                 existing = repo.get_question(question_id)
             except Exception:
                 existing = None
-            choices = parse_choices_yaml(payload.choices_yaml)
-            figures = json.loads(payload.figures_json or "[]")
-            solution_parameters = parse_parameters_yaml(
-                payload.solution_parameters_yaml
-            )
-            distractor_funcs = parse_distractor_functions_text(
-                payload.distractor_functions_text
-            )
-            question = Question.model_validate(
+            question, preview, mc_preview = _build_question_from_editor_values(
+                question_id,
+                existing,
                 {
-                    "id": question_id,
                     "title": payload.title,
-                    "question_type": QuestionType(payload.question_type),
-                    "mc_options_guidance": payload.mc_options_guidance,
-                    "choices": choices,
-                    "solution": {
-                        "question_template_md": normalize_markdown_math_delimiters(
-                            payload.question_template_md
-                        ),
-                        "parameters": solution_parameters,
-                        "answer_guidance": payload.answer_guidance,
-                        "answer_python_code": payload.answer_python_code,
-                        "distractor_python_code": distractor_funcs,
-                        "typed_solution_md": normalize_markdown_math_delimiters(
-                            payload.typed_solution_md
-                        ),
-                        "typed_solution_status": payload.typed_solution_status,
-                        "last_computed_answer_md": (
-                            normalize_markdown_math_delimiters(
-                                existing.solution.last_computed_answer_md
-                            )
-                            if existing
-                            else ""
-                        ),
-                    },
-                    "figures": figures,
                     "points": payload.points,
-                    "is_deleted": (existing.is_deleted if existing else False),
-                }
+                    "question_type": payload.question_type,
+                    "mc_options_guidance": payload.mc_options_guidance,
+                    "question_template_md": payload.question_template_md,
+                    "solution_parameters_yaml": payload.solution_parameters_yaml,
+                    "answer_formula_md": payload.answer_formula_md,
+                    "answer_guidance": payload.answer_guidance,
+                    "answer_python_code": payload.answer_python_code,
+                    "distractor_functions_text": payload.distractor_functions_text,
+                    "mc_answer_specs_json": payload.mc_answer_specs_json,
+                    "typed_solution_md": payload.typed_solution_md,
+                    "typed_solution_status": payload.typed_solution_status,
+                    "choices_yaml": payload.choices_yaml,
+                    "figures_json": payload.figures_json,
+                },
             )
-            _mark_typed_solution_stale_if_needed(existing, question)
             repo.save_question(question)
             return JSONResponse(
                 {
@@ -501,6 +598,74 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
         q = repo.get_question(question_id)
         errors = validate_question(q)
         return {"question_id": question_id, "errors": errors, "ok": not errors}
+
+    @app.post("/questions/{question_id}/ai/chat")
+    def ai_chat(question_id: str, payload: ChatPayload = Body(...)) -> dict:
+        try:
+            q = repo.get_question(question_id)
+            result = app.state.ai.chat_edit_question(q, payload.message)
+            repo.add_ai_usage(result.usage)
+
+            editor_values = _editor_values_from_question(q)
+            warnings = list(result.warnings)
+            allowed_keys = {
+                "title",
+                "points",
+                "question_type",
+                "mc_options_guidance",
+                "question_template_md",
+                "solution_parameters_yaml",
+                "answer_formula_md",
+                "answer_guidance",
+                "distractor_functions_text",
+                "mc_answer_specs_json",
+                "choices_yaml",
+                "typed_solution_md",
+                "typed_solution_status",
+            }
+            updates = {
+                key: value
+                for key, value in (result.updates or {}).items()
+                if key in allowed_keys
+            }
+            unknown = sorted(set(result.updates or {}) - allowed_keys)
+            if unknown:
+                warnings.append(
+                    "Ignored unsupported update fields: " + ", ".join(unknown)
+                )
+            changed_fields: list[str] = []
+            for key, value in updates.items():
+                if editor_values.get(key) != value:
+                    changed_fields.append(key)
+                editor_values[key] = value
+
+            question, preview, mc_preview = _build_question_from_editor_values(
+                question_id,
+                q,
+                editor_values,
+            )
+            repo.save_question(question)
+            editor_values = _editor_values_from_question(question)
+            return {
+                "ok": True,
+                "assistant_message": result.assistant_message,
+                "warnings": warnings,
+                "changed_fields": changed_fields,
+                **editor_values,
+                "calculated_variables_md": preview["calculated_variables_md"],
+                "rendered_answer_md": (
+                    question.solution.last_computed_answer_md
+                    or preview["rendered_answer_md"]
+                ),
+                "answer_formula_warning": preview["warning"],
+                "mc_preview_choices": mc_preview["preview_choices"],
+                "mc_preview_answers": mc_preview["preview_answers"],
+                "mc_preview_rationale": mc_preview["preview_rationale"],
+                "mc_preview_warning": mc_preview["warning"],
+                "mc_preview_rows": mc_preview["rows"],
+            }
+        except Exception as ex:
+            return JSONResponse({"ok": False, "error": str(ex)}, status_code=422)
 
     @app.post("/questions/{question_id}/ai/rewrite-and-parameterize")
     def ai_rewrite_and_parameterize(question_id: str) -> dict:

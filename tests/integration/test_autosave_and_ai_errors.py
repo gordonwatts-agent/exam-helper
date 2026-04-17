@@ -366,3 +366,48 @@ def test_autosave_updates_mc_options_guidance(tmp_path) -> None:
     assert resp.status_code == 200
     saved = repo.get_question("q_mc_guidance")
     assert saved.mc_options_guidance == "Use realistic sign mistakes only."
+
+
+def test_ai_chat_updates_question_and_returns_payload(tmp_path) -> None:
+    repo = ProjectRepository(tmp_path)
+    repo.init_project("Exam", "Physics")
+    app = create_app(tmp_path, openai_key="k")
+    client = TestClient(app)
+    _seed_question(client, "q_chat")
+
+    class _AI:
+        def chat_edit_question(self, question, user_message):
+            assert question.id == "q_chat"
+            assert user_message == "Please clean this up."
+            return AIService.QuestionEditorResult(
+                assistant_message="Cleaned up the prompt.",
+                updates={
+                    "title": "Cleaned title",
+                    "question_template_md": "A cleaner prompt.",
+                    "choices_yaml": (
+                        "- label: A\n"
+                        "  content_md: Correct\n"
+                        "  is_correct: true\n"
+                        "  rationale: ''\n"
+                    ),
+                },
+                warnings=["Preserved the typed solution."],
+                usage=AIUsageTotals(),
+            )
+
+    app.state.ai = _AI()
+    resp = client.post(
+        "/questions/q_chat/ai/chat",
+        json={"message": "Please clean this up."},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["assistant_message"] == "Cleaned up the prompt."
+    assert "title" in body["changed_fields"]
+    assert body["title"] == "Cleaned title"
+    assert body["question_template_md"] == "A cleaner prompt."
+    assert body["warnings"] == ["Preserved the typed solution."]
+    saved = repo.get_question("q_chat")
+    assert saved.title == "Cleaned title"
+    assert saved.solution.question_template_md == "A cleaner prompt."

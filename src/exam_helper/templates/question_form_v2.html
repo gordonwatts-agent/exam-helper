@@ -176,6 +176,49 @@
         grid-template-columns: 1fr 1fr;
         gap: 1rem;
       }
+      .chat-panel {
+        display: grid;
+        gap: 0.85rem;
+      }
+      .chat-log {
+        display: grid;
+        gap: 0.7rem;
+        max-height: 280px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: #fff;
+        padding: 0.85rem;
+      }
+      .chat-message {
+        border-radius: 14px;
+        padding: 0.75rem 0.85rem;
+        max-width: 88%;
+      }
+      .chat-message.user {
+        justify-self: end;
+        background: var(--accent-soft);
+      }
+      .chat-message.assistant {
+        justify-self: start;
+        background: #fff;
+        border: 1px solid #eadfcf;
+      }
+      .chat-role {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 0.35rem;
+      }
+      .chat-input-row {
+        display: grid;
+        gap: 0.6rem;
+      }
+      .chat-input-row textarea {
+        min-height: 92px;
+      }
       @media (max-width: 900px) {
         .row, .row3, .mc-preview-grid {
           grid-template-columns: 1fr;
@@ -204,6 +247,13 @@
       </div>
 
       <form method="post" action="/questions/save" id="question-form">
+        <textarea hidden name="mc_options_guidance" id="mc_options_guidance">{{ question.mc_options_guidance if question else '' }}</textarea>
+        <textarea hidden name="answer_guidance" id="answer_guidance">{{ question.solution.answer_guidance if question else '' }}</textarea>
+        <textarea hidden name="answer_python_code" id="answer_python_code">{{ question.solution.answer_python_code if question else '' }}</textarea>
+        <textarea hidden name="answer_formula_md" id="answer_formula_md">{{ question.solution.answer_formula_md if question else '' }}</textarea>
+        <textarea hidden name="distractor_functions_text" id="distractor_functions_text">{{ distractor_functions_text }}</textarea>
+        <textarea hidden name="mc_answer_specs_json" id="mc_answer_specs_json">{{ mc_answer_specs_json }}</textarea>
+        <textarea hidden name="typed_solution_status" id="typed_solution_status">{{ question.solution.typed_solution_status if question else 'missing' }}</textarea>
         <div class="row3">
           <div class="card">
             <label>Question ID</label>
@@ -225,6 +275,19 @@
         <div class="card">
           <label>Title (optional)</label>
           <input name="title" id="title" value="{{ question.title if question else '' }}" />
+        </div>
+
+        <div class="card chat-panel">
+          <label for="chat_message">Chat Assistant</label>
+          <p class="hint">Ask for a rewrite, a cleanup pass, a distractor tweak, or a question-specific edit. Use Shift+Enter for a newline.</p>
+          <div id="chat_thread" class="chat-log" aria-live="polite"></div>
+          <div class="chat-input-row">
+            <textarea id="chat_message" placeholder="e.g. Please turn this rough prompt into a cleaner exam question."></textarea>
+            <div class="actions">
+              <button type="button" class="btn" id="btn_send_chat">Send</button>
+              <span id="chat_status" class="status"></span>
+            </div>
+          </div>
         </div>
 
         <div class="row">
@@ -297,6 +360,13 @@
       const paramsEl = document.getElementById("solution_parameters_yaml");
       const choicesEl = document.getElementById("choices_yaml");
       const typedSolutionEl = document.getElementById("typed_solution_md");
+      const mcOptionsGuidanceEl = document.getElementById("mc_options_guidance");
+      const answerGuidanceEl = document.getElementById("answer_guidance");
+      const answerPythonCodeEl = document.getElementById("answer_python_code");
+      const answerFormulaEl = document.getElementById("answer_formula_md");
+      const distractorFnsEl = document.getElementById("distractor_functions_text");
+      const mcAnswerSpecsEl = document.getElementById("mc_answer_specs_json");
+      const typedStatusEl = document.getElementById("typed_solution_status");
       const figuresInput = document.getElementById("figures_json");
       const figuresPreviewEl = document.getElementById("figures_preview");
       const figuresSectionEl = document.getElementById("figures_section");
@@ -307,12 +377,21 @@
       const mcPreviewAnswers = document.getElementById("mc_preview_answers");
       const mcPreviewRationale = document.getElementById("mc_preview_rationale");
       const typedPreview = document.getElementById("typed_solution_preview");
+      const chatThreadEl = document.getElementById("chat_thread");
+      const chatMessageEl = document.getElementById("chat_message");
+      const chatSendBtn = document.getElementById("btn_send_chat");
+      const chatStatusEl = document.getElementById("chat_status");
 
       let autosaveTimer = null;
 
       function setStatus(text, cls) {
         saveStatus.textContent = text;
         saveStatus.className = `status ${cls || ""}`;
+      }
+
+      function setChatStatus(text, cls) {
+        chatStatusEl.textContent = text;
+        chatStatusEl.className = `status ${cls || ""}`;
       }
 
       function isMC() {
@@ -530,6 +609,90 @@
         }
       }
 
+      function renderChatMessage(role, text) {
+        const item = document.createElement("div");
+        item.className = `chat-message ${role}`;
+        item.innerHTML = `
+          <div class="chat-role">${role === "assistant" ? "Assistant" : "You"}</div>
+          <div>${escapeHtml(String(text || "")).replace(/\n/g, "<br>")}</div>
+        `;
+        chatThreadEl.appendChild(item);
+        chatThreadEl.scrollTop = chatThreadEl.scrollHeight;
+      }
+
+      function setEditorValuesFromResponse(data) {
+        if (typeof data.title === "string") titleEl.value = data.title;
+        if (Object.prototype.hasOwnProperty.call(data, "points")) pointsEl.value = data.points;
+        if (typeof data.question_type === "string") questionTypeEl.value = data.question_type;
+        if (typeof data.mc_options_guidance === "string") mcOptionsGuidanceEl.value = data.mc_options_guidance;
+        if (typeof data.question_template_md === "string") templateEl.value = data.question_template_md;
+        if (typeof data.solution_parameters_yaml === "string") paramsEl.value = data.solution_parameters_yaml;
+        if (typeof data.answer_guidance === "string") answerGuidanceEl.value = data.answer_guidance;
+        if (typeof data.answer_python_code === "string") answerPythonCodeEl.value = data.answer_python_code;
+        if (typeof data.answer_formula_md === "string") answerFormulaEl.value = data.answer_formula_md;
+        if (typeof data.distractor_functions_text === "string") distractorFnsEl.value = data.distractor_functions_text;
+        if (typeof data.mc_answer_specs_json === "string") mcAnswerSpecsEl.value = data.mc_answer_specs_json;
+        if (typeof data.choices_yaml === "string") choicesEl.value = data.choices_yaml;
+        if (Array.isArray(data.mc_preview_choices)) {
+          choicesEl.value = jsyaml.dump(data.mc_preview_choices, { sortKeys: false });
+        }
+        if (typeof data.typed_solution_md === "string") typedSolutionEl.value = data.typed_solution_md;
+        if (typeof data.typed_solution_status === "string") typedStatusEl.value = data.typed_solution_status;
+        if (Object.prototype.hasOwnProperty.call(data, "figures_json") && typeof data.figures_json === "string") {
+          figuresInput.value = data.figures_json;
+        }
+        updateMCVisibility();
+        renderFiguresPreview();
+        renderTemplate();
+        renderMCPreview();
+        renderTypedPreview();
+      }
+
+      function applyAssistantResponse(data) {
+        setEditorValuesFromResponse(data);
+        if (Array.isArray(data.warnings) && data.warnings.length) {
+          setChatStatus(data.warnings.join(" | "), "warn");
+        } else {
+          setChatStatus("Saved", "good");
+        }
+        setStatus("Updated via chat", "good");
+      }
+
+      async function sendChatMessage() {
+        const qid = questionIdEl.value.trim();
+        const message = chatMessageEl.value.trim();
+        if (!qid || !message) return;
+        if (autosaveTimer) clearTimeout(autosaveTimer);
+        chatSendBtn.disabled = true;
+        chatMessageEl.disabled = true;
+        setChatStatus("Thinking...", "warn");
+        renderChatMessage("user", message);
+        chatMessageEl.value = "";
+        try {
+          const res = await fetch(`/questions/${qid}/ai/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || res.statusText || "Chat update failed.");
+          }
+          renderChatMessage("assistant", data.assistant_message || "(no response)");
+          applyAssistantResponse(data);
+          if (Array.isArray(data.changed_fields) && data.changed_fields.length) {
+            setChatStatus(`Changed: ${data.changed_fields.join(", ")}`, "good");
+          }
+        } catch (err) {
+          setChatStatus(`Chat error: ${err.message}`, "warn");
+          renderChatMessage("assistant", `Error: ${err.message}`);
+        } finally {
+          chatSendBtn.disabled = false;
+          chatMessageEl.disabled = false;
+          chatMessageEl.focus();
+        }
+      }
+
       function updateMCVisibility() {
         mcBlock.style.display = isMC() ? "block" : "none";
       }
@@ -574,8 +737,10 @@
           solution_parameters_yaml: paramsEl.value,
           answer_guidance: initialAutosaveState.answer_guidance,
           answer_python_code: initialAutosaveState.answer_python_code,
+          answer_formula_md: answerFormulaEl.value,
           mc_options_guidance: initialAutosaveState.mc_options_guidance,
           distractor_functions_text: initialAutosaveState.distractor_functions_text,
+          mc_answer_specs_json: getPersistedFieldValue("mc_answer_specs_json", "[]"),
           choices_yaml: choicesEl.value,
           typed_solution_md: typedSolutionEl.value,
           typed_solution_status: initialAutosaveState.typed_solution_status,
@@ -693,11 +858,27 @@
         setStatus("Saving...", "warn");
       });
 
+      chatSendBtn.addEventListener("click", () => {
+        sendChatMessage().catch((err) => setChatStatus(`Chat error: ${err.message}`, "warn"));
+      });
+      chatMessageEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendChatMessage().catch((err) => setChatStatus(`Chat error: ${err.message}`, "warn"));
+        }
+      });
+
       renderTemplate();
       renderMCPreview();
       renderTypedPreview();
       updateMCVisibility();
       renderFiguresPreview();
+      if (!chatThreadEl.children.length) {
+        renderChatMessage(
+          "assistant",
+          "{{ 'OpenAI chat is enabled.' if ai_enabled else 'Configure an OpenAI key to use chat.' }}"
+        );
+      }
     </script>
   </body>
 </html>

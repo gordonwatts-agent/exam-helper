@@ -176,3 +176,20 @@ def test_generate_typed_solution_extracts_typed_solution_md_from_yaml_like_paylo
     out = svc.generate_typed_solution(q)
     assert "Step 1" in out.text
     assert "Final: 2.0 m/s" in out.text
+
+
+def test_ai_service_chat_edit_question_parses_patch(monkeypatch) -> None:
+    from exam_helper import ai_service as mod
+
+    payload = (
+        '{"assistant_message":"I cleaned up the question.","updates":'
+        '{"title":"Cleaned title","question_template_md":"A mass oscillates."},'
+        '"warnings":["Left the figures unchanged."]}'
+    )
+    monkeypatch.setattr(mod, "OpenAI", lambda api_key: _FakeClient(payload))
+    svc = AIService(api_key="k")
+    q = Question(id="q1", title="Original")
+    out = svc.chat_edit_question(q, "rewrite this")
+    assert out.assistant_message == "I cleaned up the question."
+    assert out.updates["title"] == "Cleaned title"
+    assert out.warnings == ["Left the figures unchanged."]

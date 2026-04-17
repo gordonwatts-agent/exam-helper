@@ -8,6 +8,7 @@ from typing import Any
 
 from openai import OpenAI
 import yaml
+from pydantic import BaseModel, Field, model_validator
 
 from exam_helper.models import (
     AIPromptConfig,
@@ -47,6 +48,41 @@ class AIService:
     @dataclass
     class DistractorFunctionsResult:
         distractors: list[DistractorFunction]
+        usage: AIUsageTotals
+
+    class QuestionEditorState(BaseModel):
+        title: str = ""
+        question_type: str = "free_response"
+        points: int = 5
+        mc_options_guidance: str = ""
+        question_template_md: str = ""
+        solution_parameters_yaml: str = "{}"
+        answer_formula_md: str = ""
+        answer_guidance: str = ""
+        distractor_functions_text: str = ""
+        mc_answer_specs_json: str = "[]"
+        choices_yaml: str = "[]"
+        typed_solution_md: str = ""
+        typed_solution_status: str = "missing"
+
+    class QuestionEditorPatch(BaseModel):
+        assistant_message: str
+        updates: dict[str, Any] = Field(default_factory=dict)
+        warnings: list[str] = Field(default_factory=list)
+
+        @model_validator(mode="after")
+        def _normalize(self) -> "AIService.QuestionEditorPatch":
+            self.assistant_message = self.assistant_message.strip()
+            self.warnings = [
+                str(item).strip() for item in self.warnings if str(item).strip()
+            ]
+            return self
+
+    @dataclass
+    class QuestionEditorResult:
+        assistant_message: str
+        updates: dict[str, Any]
+        warnings: list[str]
         usage: AIUsageTotals
 
     def _client(self) -> OpenAI:
@@ -163,6 +199,51 @@ class AIService:
             )
         return items
 
+    @staticmethod
+    def _editor_state_for_question(
+        question: Question,
+    ) -> "AIService.QuestionEditorState":
+        def _dump_parameters(params: dict[str, Any]) -> str:
+            return yaml.safe_dump(params or {}, sort_keys=False).strip()
+
+        def _dump_distractors(funcs: list[DistractorFunction]) -> str:
+            if not funcs:
+                return ""
+            chunks: list[str] = []
+            for f in funcs:
+                chunks.append(f"# distractor: {f.id}\n{(f.python_code or '').strip()}")
+            return "\n---\n".join(chunks).strip() + "\n"
+
+        def _dump_mc_answer_specs(specs: list) -> str:
+            return json.dumps(
+                [spec.model_dump(mode="json") for spec in specs], ensure_ascii=False
+            )
+
+        def _dump_choices(choices: list) -> str:
+            payload = [
+                c.model_dump(mode="json", exclude_none=True)
+                for c in sorted(choices, key=lambda x: x.label)
+            ]
+            return yaml.safe_dump(payload, sort_keys=False)
+
+        return AIService.QuestionEditorState(
+            title=question.title,
+            question_type=question.question_type.value,
+            points=question.points,
+            mc_options_guidance=question.mc_options_guidance,
+            question_template_md=question.solution.question_template_md,
+            solution_parameters_yaml=_dump_parameters(question.solution.parameters),
+            answer_formula_md=getattr(question.solution, "answer_formula_md", ""),
+            answer_guidance=question.solution.answer_guidance,
+            distractor_functions_text=_dump_distractors(
+                question.solution.distractor_python_code
+            ),
+            mc_answer_specs_json=_dump_mc_answer_specs([]),
+            choices_yaml=_dump_choices(question.choices),
+            typed_solution_md=question.solution.typed_solution_md,
+            typed_solution_status=question.solution.typed_solution_status,
+        )
+
     def _text_with_question_context(
         self, bundle: PromptBundle, question: Question
     ) -> AIResult:
@@ -180,6 +261,59 @@ class AIService:
         if not text:
             raise ValueError("Empty AI response.")
         return AIService.AIResult(text=text, usage=self._usage_from_response(response))
+
+    def chat_edit_question(
+        self, question: Question, user_message: str
+    ) -> QuestionEditorResult:
+        client = self._client()
+        state = self._editor_state_for_question(question)
+        system_prompt = (
+            "You are editing a single exam question in a structured web form. "
+            "Return one JSON object only with keys assistant_message, updates, and warnings. "
+            "assistant_message should be a short response to the author. "
+            "updates must contain only the fields that should change. Allowed update keys are "
+            "title, points, question_type, mc_options_guidance, question_template_md, "
+            "solution_parameters_yaml, answer_formula_md, answer_guidance, "
+            "distractor_functions_text, mc_answer_specs_json, choices_yaml, "
+            "typed_solution_md, and typed_solution_status. "
+            "Do not change figures or invent values that were not requested. "
+            "Keep math and wording concise. If a change is unsafe or ambiguous, leave it out "
+            "of updates and explain why in warnings."
+        )
+        state_json = json.dumps(
+            state.model_dump(mode="json"), ensure_ascii=False, indent=2
+        )
+        user_text = (
+            "Current question state:\n"
+            f"{state_json}\n\n"
+            "Author request:\n"
+            f"{user_message.strip()}\n\n"
+            "Return only JSON."
+        )
+        response = client.responses.create(
+            model=self.model,
+            input=[
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_text},
+                        *self._figure_content(question),
+                    ],
+                },
+            ],
+        )
+        payload = self._parse_json_object(getattr(response, "output_text", ""))
+        parsed = AIService.QuestionEditorPatch.model_validate(payload)
+        return AIService.QuestionEditorResult(
+            assistant_message=parsed.assistant_message,
+            updates=parsed.updates,
+            warnings=parsed.warnings,
+            usage=self._usage_from_response(response),
+        )
 
     @staticmethod
     def _parse_json_object(raw: str) -> dict[str, Any]:
