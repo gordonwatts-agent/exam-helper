@@ -333,6 +333,7 @@ def test_home_shows_edit2_and_new_question_2_links(tmp_path) -> None:
     assert home.status_code == 200
     assert 'href="/questions/new2"' in home.text
     assert 'href="/questions/q1/edit2"' in home.text
+    assert 'class="delete-form"' in home.text
 
 
 def test_save_persists_dollar_math_delimiters(tmp_path) -> None:
