@@ -19,7 +19,7 @@ def test_home_shows_model_and_usage(tmp_path) -> None:
     assert "gpt-5.2" in resp.text
 
 
-def test_question_editor_has_new_workflow_hooks(tmp_path) -> None:
+def test_question_editor_has_chat_workflow_hooks(tmp_path) -> None:
     repo = ProjectRepository(tmp_path)
     repo.init_project("Exam", "Physics")
     app = create_app(tmp_path, openai_key=None)
@@ -41,14 +41,44 @@ def test_question_editor_has_new_workflow_hooks(tmp_path) -> None:
     )
     resp = client.get("/questions/q_edit/edit")
     assert resp.status_code == 200
-    assert 'id="btn_rewrite"' in resp.text
-    assert 'id="btn_generate_answer"' in resp.text
-    assert 'id="mc_options_guidance"' in resp.text
-    assert 'id="btn_generate_typed_solution"' in resp.text
-    assert "function setAiBusy(isBusy)" in resp.text
-    assert "await autosaveNow({ allowWhenBusy: true });" in resp.text
-    assert "mc_options_guidance: mcOptionsGuidanceEl.value" in resp.text
-    assert "AI request in progress; editing is temporarily disabled." in resp.text
+    assert '<details class="card chat-panel"' in resp.text
+    assert "<summary>Chat Assistant</summary>" in resp.text
+    assert 'id="chat_thread"' in resp.text
+    assert 'id="chat_message"' in resp.text
+    assert 'id="btn_send_chat"' in resp.text
+    assert "formula-preview--compact" in resp.text
+    assert "OpenAI chat is enabled." not in resp.text
+    assert "Configure an OpenAI key to use chat." not in resp.text
+    assert "No API key configured" in resp.text
+    assert 'title="Shift+Enter to send"' in resp.text
+    assert 'title="No API key configured."' in resp.text
+    assert "setChatBusy(true)" in resp.text
+    assert 'event.key === "Enter" && event.shiftKey' in resp.text
+
+
+def test_question_editor_rendering_is_stable(tmp_path) -> None:
+    repo = ProjectRepository(tmp_path)
+    repo.init_project("Exam", "Physics")
+    app = create_app(tmp_path, openai_key=None)
+    client = TestClient(app)
+    client.post(
+        "/questions/save",
+        data={
+            "question_id": "q_chat",
+            "title": "T",
+            "question_type": "free_response",
+            "prompt_md": "P",
+            "question_template_md": "P",
+            "choices_yaml": "[]",
+            "typed_solution_md": "",
+            "distractor_functions_text": "",
+            "figures_json": "[]",
+            "points": 5,
+        },
+    )
+    resp = client.get("/questions/q_chat/edit")
+    assert resp.status_code == 200
+    assert 'id="chat_thread"' in resp.text
 
 
 def test_usage_totals_accumulate_and_reset(tmp_path) -> None:
@@ -130,7 +160,7 @@ def test_prompt_preview_endpoint_returns_composed_payload(tmp_path) -> None:
             }
 
     app.state.ai = _PreviewAI()
-    resp = client.post("/questions/q2/ai/preview/generate-answer-function")
+    resp = client.post("/questions/q2/ai/preview/generate-answer-formula")
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["ok"] is True

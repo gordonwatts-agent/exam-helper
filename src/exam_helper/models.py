@@ -37,6 +37,11 @@ class MCChoice(BaseModel):
     rationale: str | None = None
 
 
+class MCAnswerSpec(BaseModel):
+    formula_md: str = ""
+    rationale_md: str = ""
+
+
 class DistractorFunction(BaseModel):
     id: str
     python_code: str = ""
@@ -52,15 +57,25 @@ class DistractorFunction(BaseModel):
         return v
 
 
+class ChatTurn(BaseModel):
+    user_message: str = ""
+    assistant_message: str = ""
+    attached_figure_ids: list[str] = Field(default_factory=list)
+
+
 class Solution(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     question_template_md: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict)
+    answer_formula_md: str = ""
     answer_guidance: str = ""
-    answer_python_code: str = ""
+    mc_answer_specs: list[MCAnswerSpec] = Field(default_factory=list)
     distractor_python_code: list[DistractorFunction] = Field(default_factory=list)
     typed_solution_md: str = ""
     typed_solution_status: Literal["missing", "fresh", "stale"] = "missing"
     last_computed_answer_md: str = ""
+    chat_history: list[ChatTurn] = Field(default_factory=list)
 
 
 class Question(BaseModel):
@@ -74,7 +89,7 @@ class Question(BaseModel):
     difficulty: int = 3
     points: int = 5
     is_deleted: bool = False
-    question_type: QuestionType = QuestionType.free_response
+    question_type: QuestionType = QuestionType.multiple_choice
     mc_options_guidance: str = ""
     figures: list[FigureData] = Field(default_factory=list)
     choices: list[MCChoice] = Field(default_factory=list)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from exam_helper.models import Question
+from exam_helper.models import Question, QuestionType
 from exam_helper.repository import ProjectRepository
 from exam_helper.validation import validate_project
 
@@ -16,11 +16,9 @@ def test_validate_project_with_solution_code(tmp_path: Path) -> None:
         id="q1",
         title="t",
         prompt_md="p",
+        question_type=QuestionType.free_response,
         solution={
-            "python_code": (
-                "def solve(params, context):\n"
-                "    return {'final_answer_text': 'ok'}\n"
-            ),
+            "answer_formula_md": "answer = 'ok'",
             "parameters": {},
         },
     )
@@ -60,9 +58,7 @@ def test_validate_project_skips_soft_deleted_questions(tmp_path: Path) -> None:
             title="t",
             is_deleted=True,
             solution={
-                "answer_python_code": (
-                    "def solve(params, context):\n" "    raise RuntimeError('boom')\n"
-                ),
+                "answer_formula_md": "raise RuntimeError('boom')",
                 "parameters": {},
             },
         )
