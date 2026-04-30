@@ -78,6 +78,13 @@ def _sanitize_docx_filename_stem(project_name: str) -> str:
     return stem or "exam"
 
 
+def _browser_title(prefix: str, suffix: str | None = None) -> str:
+    suffix_text = (suffix or "").strip()
+    if suffix_text:
+        return f"{prefix} - {suffix_text}"
+    return prefix
+
+
 def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
@@ -478,6 +485,18 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
                 question.id if question else _suggest_next_question_id()
             ),
             "editor_state": editor_state.model_dump(mode="json"),
+            "page_title": (
+                _browser_title(
+                    "Question Editor",
+                    (
+                        f"{question.id} - {question.title.strip()}"
+                        if question and question.title.strip()
+                        else (question.id if question else "New Question")
+                    ),
+                )
+                if question
+                else "Question Editor - New Question"
+            ),
         }
 
     def _parse_chat_history_json(raw: str) -> list[ChatTurn]:
@@ -799,6 +818,9 @@ def create_app(project_root: Path, openai_key: str | None) -> FastAPI:
                 "ai_model": (project.ai.model if project else DEFAULT_OPENAI_MODEL),
                 "ai_usage": (project.ai.usage if project else AIUsageTotals()),
                 "ai_prompts": (project.ai.prompts if project else None),
+                "page_title": _browser_title(
+                    "Exam Helper", project.name if project else None
+                ),
             },
         )
         if export_warning:
